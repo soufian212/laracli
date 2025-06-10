@@ -1,0 +1,7 @@
+/target/
+*.log
+*.tmp
+tools/nginx-1.23.3/*
+tools/mysql-8.4.5-winx64/*
+!tools/nginx-1.23.3/README.md
+!tools/mysql-8.4.5-winx64/README.md
