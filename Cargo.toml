@@ -1,6 +1,6 @@
 [package]
 name = "laracli"
-version = "0.1.3"
+version = "0.2"
 edition = "2024"
 default-run = "laracli"
 
@@ -42,3 +42,8 @@ path = "src/service_main.rs"
 name = "laracli-service-config"
 path = "src/service_config.rs"
 
+
+
+[build-dependencies]
+chrono = "0.4"
+zip = "0.6"

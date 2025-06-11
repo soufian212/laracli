@@ -11,6 +11,19 @@ mod commands {
 mod helpers;
 mod utils;
 
+const VERSION: &str = "0.2-beta";
+const NAME: &str = "laracli";
+const BUILD_DATE: &str = env!("BUILD_DATE");
+const GIT_HASH: &str = env!("GIT_HASH");
+
+fn print_version() {
+    println!("{} v{}", NAME.bright_cyan(), VERSION.bright_green());
+    println!("Build: {} ({})", BUILD_DATE.dimmed(), GIT_HASH.dimmed());
+    println!("Platform: {}", std::env::consts::OS);
+}
+
+
+
 #[tokio::main]
 async fn main() {
     let cli: cli::Cli = argh::from_env();
@@ -67,5 +80,9 @@ async fn main() {
             commands::nginx::start().expect("Failed to start Nginx");
             commands::mysql::start().expect("Failed to start MySQL");
         }
+        cli::Commands::Version(_) => {
+           print_version();
+        }
+
     }
 }

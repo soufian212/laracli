@@ -14,6 +14,7 @@ pub enum Commands {
     Unlink(Unlink),
     Setup(Setup),
     Run(Run),
+    Version(Version)
 }
 
 #[derive(FromArgs, Debug)]
@@ -115,6 +116,11 @@ pub struct Setup {}
 #[derive(FromArgs, Debug)]
 #[argh(subcommand, name = "run")]
 pub struct Run {}
+
+/// Show version information
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "version")]
+pub struct Version {}
 
 #[derive(FromArgs, Debug)]
 /// laracli
