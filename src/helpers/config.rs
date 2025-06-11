@@ -1,10 +1,12 @@
 use std::{collections::HashSet, fs, path::PathBuf};
 
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 
 pub fn create_config_file() {
-    let config_path = get_config_path();
+    println!("{}", "Creating config file".yellow());
+    let config_path = PathBuf::from(r"C:\laracli\config.json");
     let config_dir = config_path.parent().unwrap();
     if !config_dir.exists() {
         fs::create_dir_all(config_dir).expect("Failed to create config directory");
@@ -17,8 +19,10 @@ pub fn create_config_file() {
         };
 
         let config_json = serde_json::to_string_pretty(&default_config).unwrap();
-        fs::write(&config_path, config_json).expect("Failed to write config file");
+        fs::write(&config_path, config_json).expect("Failed to create config file");
     }
+        println!("{}", "✅ Config file created".green());
+
 }
 
 pub fn get_config_path() -> PathBuf {    

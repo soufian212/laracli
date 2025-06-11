@@ -60,6 +60,7 @@ async fn main() {
             println!("{}", "Setting up services...".yellow());
             commands::setup::setup_tools().await.expect("Failed to setup tools");
             commands::setup::setup_services().expect("Failed to setup services");
+            helpers::config::create_config_file();
             commands::setup::add_exe_to_path().expect("Failed to add exe to path");
         }
         cli::Commands::Run(_) => {
