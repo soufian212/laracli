@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::Write;
-use crate::helpers::{self, path};
+use crate::helpers::{path};
 
 
 pub fn create_global_nginx_config() -> Result<(), Box<dyn std::error::Error>> {
@@ -98,29 +98,57 @@ http {{
         }}
     }}
 }}
-pid        logs/nginx.pid;"#,
+pid        logs/nginx.pid;
+"#,
         include_path.replace('\\', "/")
     )
 }
 
 fn generate_nginx_site_config(path: &str, server_name: &str) -> String {
+    let root_path = {
+        let path = std::path::Path::new(path);
+        if path.join("index.php").exists() || path.join("index.html").exists() || path.join("index.htm").exists() {
+            path.to_string_lossy().into_owned()
+        } else if path.join("public").join("index.php").exists() || path.join("public").join("index.html").exists() || path.join("public").join("index.htm").exists() {
+            path.join("public").to_string_lossy().into_owned()
+        } else {
+            path.to_string_lossy().into_owned()
+        }
+    };
+
     format!(
-        r#"server {{
+        r#"
+       
+
+server {{
     listen       80;
     server_name  {}.test;
 
     location / {{
         root   "{}";
         index  index.php index.html index.htm;
+        try_files $uri $uri/ /index.php?$query_string;
+    }}
+
+    location ~ \.php$ {{
+        root           "{}";
+        fastcgi_pass   127.0.0.1:9000;
+        fastcgi_index  index.php;
+        fastcgi_param  SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include        fastcgi_params;
+    }}
+
+    location ~ /\.ht {{
+        deny all;
     }}
 }}
+
 "#,
         server_name,
-        path.replace('\\', "/"),
+        root_path.replace('\\', "/"),
+        root_path.replace('\\', "/")
     )
 }
-
-
 pub fn delete_nginx_config(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let config_name = std::path::Path::new(&path).file_name().unwrap().to_str().unwrap();
     let nginx_path = path::get_nginx_path().unwrap();

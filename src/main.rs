@@ -1,4 +1,3 @@
-use argh::FromArgs;
 use colored::Colorize;
 mod cli;
 mod commands {
@@ -7,11 +6,12 @@ mod commands {
     pub mod watch;
     pub mod link;
     pub mod setup;
+    pub mod php;
 }
 mod helpers;
 mod utils;
 
-const VERSION: &str = "0.2.1-beta";
+const VERSION: &str = "0.3.0-beta";
 const NAME: &str = "laracli";
 const BUILD_DATE: &str = env!("BUILD_DATE");
 const GIT_HASH: &str = env!("GIT_HASH");
@@ -76,9 +76,11 @@ async fn main() {
             helpers::config::create_config_file();
             commands::setup::add_exe_to_path().expect("Failed to add exe to path");
         }
-        cli::Commands::Run(_) => {
+        cli::Commands::StartDev(_) => {
+            commands::php::start_php_cgi().expect("Failed to start PHP CGI");
             commands::nginx::start().expect("Failed to start Nginx");
             commands::mysql::start().expect("Failed to start MySQL");
+
         }
         cli::Commands::Version(_) => {
            print_version();

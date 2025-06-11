@@ -13,7 +13,7 @@ pub enum Commands {
     Link(Link),
     Unlink(Unlink),
     Setup(Setup),
-    Run(Run),
+    StartDev(Run),
     Version(Version)
 }
 
@@ -112,9 +112,9 @@ pub struct Unlink {
 #[argh(subcommand, name = "setup")]
 pub struct Setup {}
 
-/// start nginx and mysql at o
+/// start php nginx and mysql services
 #[derive(FromArgs, Debug)]
-#[argh(subcommand, name = "run")]
+#[argh(subcommand, name = "start-dev")]
 pub struct Run {}
 
 /// Show version information

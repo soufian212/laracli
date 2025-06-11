@@ -15,7 +15,6 @@ use winreg::RegKey;
 use winreg::enums::*;
 use zip::ZipArchive;
 use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom};
 
 
 pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
@@ -124,7 +123,7 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create default config if it doesn't exist
-    let config_path = Path::new(r"C:\ProgramData\laracli\config.json");
+    let config_path = Path::new(r"C:\laracli\config.json");
     if !config_path.exists() {
         fs::create_dir_all(config_path.parent().unwrap())?;
         let default_config = r#"{
@@ -333,7 +332,20 @@ pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     fs::remove_file(nginx_zip)?;
     println!("{}", "✅ Nginx extracted successfully".green());
 
-    // --- Download and extract MySQL ---
+    
+    // --- Download and extract Php ---
+    let php_url = "https://files04.tchspt.com/down/php-8.4.8-Win32-vs17-x64.zip";
+    let php_zip = "php-8.4.8-nts-Win32-vs17-x64.zip";
+    println!("{}", "Downloading PHP (approx. 32 MB, may take a few minutes)...".yellow());
+    download_with_progress_async(php_url, php_zip, "PHP", 3).await?;
+    println!("{}", "Extracting PHP".yellow());
+    let php_file = fs::File::open(php_zip)?;
+    let mut php_archive = ZipArchive::new(php_file)?;
+    php_archive.extract(&tools_dir.join(&php_zip.replace(".zip", "")))?;
+    fs::remove_file(php_zip)?;
+    println!("{}", "✅ PHP extracted successfully".green());
+
+    //--- Download and extract MySQL ---
     let mysql_url = "https://cdn.mysql.com//Downloads/MySQL-8.4/mysql-8.4.5-winx64.zip";
     let mysql_zip = "mysql-8.4.5-winx64_2.zip";
     println!("{}", "Downloading MySQL (approx. 247 MB, may take a few minutes)...".yellow());
@@ -416,7 +428,7 @@ pub fn add_exe_to_path() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "{}",
-        r#"✅ You are ready to star type "laracli run"  "#.green()
+        r#"✅ You are ready to star type "laracli run-dev"  "#.green()
     );
 
     Ok(())
