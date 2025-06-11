@@ -11,7 +11,7 @@ mod commands {
 mod helpers;
 mod utils;
 
-const VERSION: &str = "0.2-beta";
+const VERSION: &str = "0.2.1-beta";
 const NAME: &str = "laracli";
 const BUILD_DATE: &str = env!("BUILD_DATE");
 const GIT_HASH: &str = env!("GIT_HASH");
