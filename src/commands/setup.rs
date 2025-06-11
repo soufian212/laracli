@@ -14,6 +14,8 @@ use std::fs::File;
 use winreg::RegKey;
 use winreg::enums::*;
 use zip::ZipArchive;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom};
 
 
 pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
@@ -142,8 +144,13 @@ pub async fn download_with_progress_async(
     label: &str,
     max_retries: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Create a more robust HTTP client
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .pool_max_idle_per_host(1)
+        .user_agent("laracli/1.0")
         .build()?;
 
     for attempt in 1..=max_retries {
@@ -152,28 +159,61 @@ pub async fn download_with_progress_async(
             format!("Downloading {} (Attempt {}/{})", label, attempt, max_retries).yellow()
         );
 
-        let res = match client.get(url).send().await {
+        // Check if partial file exists for resume
+        let mut resume_from = 0u64;
+        if attempt > 1 && std::path::Path::new(out_path).exists() {
+            if let Ok(metadata) = std::fs::metadata(out_path) {
+                resume_from = metadata.len();
+                println!("Resuming download from {} bytes", resume_from);
+            }
+        }
+
+        // Build request with range header for resume
+        let mut request = client.get(url);
+        if resume_from > 0 {
+            request = request.header("Range", format!("bytes={}-", resume_from));
+        }
+
+        let res = match request.send().await {
             Ok(response) => response,
             Err(e) => {
                 println!("❌ Request failed: {}", e);
                 if attempt == max_retries {
                     return Err(format!("Failed to GET from '{}' after {} attempts: {}", url, max_retries, e).into());
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;
             }
         };
 
-        if !res.status().is_success() {
+        if !res.status().is_success() && res.status().as_u16() != 206 {
             println!("❌ HTTP error: {}", res.status());
             if attempt == max_retries {
                 return Err(format!("HTTP error {}: {}", res.status(), res.status().canonical_reason().unwrap_or("Unknown")).into());
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
             continue;
         }
 
-        let total_size = res.content_length().unwrap_or(0);
+        let total_size = if res.status().as_u16() == 206 {
+            // Partial content - parse Content-Range header
+            if let Some(content_range) = res.headers().get("content-range") {
+                if let Ok(range_str) = content_range.to_str() {
+                    if let Some(total_str) = range_str.split('/').nth(1) {
+                        total_str.parse::<u64>().unwrap_or(0)
+                    } else {
+                        res.content_length().unwrap_or(0) + resume_from
+                    }
+                } else {
+                    res.content_length().unwrap_or(0) + resume_from
+                }
+            } else {
+                res.content_length().unwrap_or(0) + resume_from
+            }
+        } else {
+            res.content_length().unwrap_or(0)
+        };
+
         let pb = ProgressBar::new(total_size);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -181,22 +221,38 @@ pub async fn download_with_progress_async(
                 .unwrap(),
         );
 
-        // Create file directly (remove temp file logic that wasn't working properly)
-        let mut file = match File::create(out_path) {
-            Ok(f) => f,
-            Err(e) => {
-                println!("❌ Failed to create file '{}': {}", out_path, e);
-                if attempt == max_retries {
-                    return Err(format!("Failed to create file '{}': {}", out_path, e).into());
+        // Open file for writing (append if resuming)
+        let mut file = if resume_from > 0 {
+            match OpenOptions::new().create(true).append(true).open(out_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    println!("❌ Failed to open file for append '{}': {}", out_path, e);
+                    if attempt == max_retries {
+                        return Err(format!("Failed to open file '{}': {}", out_path, e).into());
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
                 }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
+            }
+        } else {
+            match File::create(out_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    println!("❌ Failed to create file '{}': {}", out_path, e);
+                    if attempt == max_retries {
+                        return Err(format!("Failed to create file '{}': {}", out_path, e).into());
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
             }
         };
 
-        let mut downloaded: u64 = 0;
+        let mut downloaded = resume_from;
+        pb.set_position(downloaded);
         let mut stream = res.bytes_stream();
         let mut download_success = true;
+        let mut last_progress = std::time::Instant::now();
 
         while let Some(item) = stream.next().await {
             match item {
@@ -206,9 +262,18 @@ pub async fn download_with_progress_async(
                         download_success = false;
                         break;
                     }
-                    let new = downloaded + (chunk.len() as u64);
-                    downloaded = new;
-                    pb.set_position(new);
+                    downloaded += chunk.len() as u64;
+                    pb.set_position(downloaded);
+
+                    // Flush every 10MB or every 5 seconds
+                    if downloaded % (10 * 1024 * 1024) == 0 || last_progress.elapsed() > Duration::from_secs(5) {
+                        if let Err(e) = file.flush() {
+                            println!("❌ Error flushing file: {}", e);
+                            download_success = false;
+                            break;
+                        }
+                        last_progress = std::time::Instant::now();
+                    }
                 }
                 Err(e) => {
                     println!("❌ Error while downloading chunk: {}", e);
@@ -218,30 +283,38 @@ pub async fn download_with_progress_async(
             }
         }
 
-        if download_success && (total_size == 0 || downloaded == total_size) {
+        // Final flush
+        if let Err(e) = file.flush() {
+            println!("❌ Error during final flush: {}", e);
+            download_success = false;
+        }
+
+        if download_success && (total_size == 0 || downloaded >= total_size) {
             pb.finish_with_message(format!("✅ {} downloaded successfully", label));
+            println!("✅ {} downloaded ({} bytes)", label, downloaded);
             return Ok(());
         } else {
             pb.finish_with_message(format!("❌ {} download failed", label));
             println!("❌ Download failed. Expected: {} bytes, Downloaded: {} bytes", total_size, downloaded);
             
-            // Clean up partial file
-            if let Err(e) = std::fs::remove_file(out_path) {
-                println!("Warning: Failed to remove partial file: {}", e);
-            }
-            
             if attempt == max_retries {
+                // Clean up partial file only on final failure
+                if let Err(e) = std::fs::remove_file(out_path) {
+                    println!("Warning: Failed to remove partial file: {}", e);
+                }
                 return Err(format!("Download incomplete after {} attempts. Last attempt downloaded {} of {} bytes", 
                     max_retries, downloaded, total_size).into());
             }
             
-            println!("Retrying in 5 seconds...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            println!("Retrying in 10 seconds...");
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 
     Err("Download failed after all retries".into())
 }
+
+
 pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     let tools_dir = Path::new("tools");
 
@@ -256,7 +329,7 @@ pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "Extracting Nginx".yellow());
     let nginx_file = fs::File::open(nginx_zip)?;
     let mut nginx_archive = ZipArchive::new(nginx_file)?;
-    nginx_archive.extract(&tools_dir.join("nginx-1.23.3"))?;
+    nginx_archive.extract(&tools_dir)?;
     fs::remove_file(nginx_zip)?;
     println!("{}", "✅ Nginx extracted successfully".green());
 
