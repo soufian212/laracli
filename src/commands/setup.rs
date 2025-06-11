@@ -1,18 +1,19 @@
-use std::{fs, time::Duration};
+use colored::Colorize;
+use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
+use laracli::helpers::{self, config, nginx};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use colored::Colorize;
-use laracli::helpers::{self, config, nginx};
-use reqwest::blocking::Client;
-use zip::ZipArchive;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::io::{Read, Write};
-use winreg::enums::*;
-use winreg::RegKey;
-use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE};
+use std::{fs, time::Duration};
 use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::core::PCWSTR;
-
+use windows::Win32::UI::WindowsAndMessaging::{
+    HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+};
+use std::fs::File;
+use winreg::RegKey;
+use winreg::enums::*;
+use zip::ZipArchive;
 
 
 pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
@@ -62,17 +63,11 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
         println!("Executing sc command: sc {}", sc_args.join(" "));
 
         // Install service
-        let install_output = Command::new("sc")
-            .args(&sc_args)
-            .output()?;
+        let install_output = Command::new("sc").args(&sc_args).output()?;
 
         if !install_output.status.success() {
             let stderr = String::from_utf8_lossy(&install_output.stderr);
-            println!(
-                "Failed to install {} service: {}",
-                service_name,
-                stderr
-            );
+            println!("Failed to install {} service: {}", service_name, stderr);
             return Err(format!("Failed to install {} service: {}", service_name, stderr).into());
         }
 
@@ -109,9 +104,7 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Start the service
-        let start_output = Command::new("sc")
-            .args(&["start", service_name])
-            .output()?;
+        let start_output = Command::new("sc").args(&["start", service_name]).output()?;
 
         if !start_output.status.success() {
             println!(
@@ -122,7 +115,10 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("Failed to start {} service", service_name).into());
         }
 
-        println!("Successfully installed and started {} service", service_name);
+        println!(
+            "Successfully installed and started {} service",
+            service_name
+        );
     }
 
     // Create default config if it doesn't exist
@@ -137,84 +133,125 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
         println!("Created default config at {:?}", config_path);
     }
 
-
     Ok(())
 }
 
+pub async fn download_with_progress_async(
+    url: &str,
+    out_path: &str,
+    label: &str,
+    max_retries: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+        .build()?;
 
+    for attempt in 1..=max_retries {
+        println!(
+            "{}",
+            format!("Downloading {} (Attempt {}/{})", label, attempt, max_retries).yellow()
+        );
 
-pub fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
+        let res = match client.get(url).send().await {
+            Ok(response) => response,
+            Err(e) => {
+                println!("❌ Request failed: {}", e);
+                if attempt == max_retries {
+                    return Err(format!("Failed to GET from '{}' after {} attempts: {}", url, max_retries, e).into());
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        if !res.status().is_success() {
+            println!("❌ HTTP error: {}", res.status());
+            if attempt == max_retries {
+                return Err(format!("HTTP error {}: {}", res.status(), res.status().canonical_reason().unwrap_or("Unknown")).into());
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        let total_size = res.content_length().unwrap_or(0);
+        let pb = ProgressBar::new(total_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .unwrap(),
+        );
+
+        // Create file directly (remove temp file logic that wasn't working properly)
+        let mut file = match File::create(out_path) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("❌ Failed to create file '{}': {}", out_path, e);
+                if attempt == max_retries {
+                    return Err(format!("Failed to create file '{}': {}", out_path, e).into());
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let mut downloaded: u64 = 0;
+        let mut stream = res.bytes_stream();
+        let mut download_success = true;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => {
+                    if let Err(e) = file.write_all(&chunk) {
+                        println!("❌ Error writing to file: {}", e);
+                        download_success = false;
+                        break;
+                    }
+                    let new = downloaded + (chunk.len() as u64);
+                    downloaded = new;
+                    pb.set_position(new);
+                }
+                Err(e) => {
+                    println!("❌ Error while downloading chunk: {}", e);
+                    download_success = false;
+                    break;
+                }
+            }
+        }
+
+        if download_success && (total_size == 0 || downloaded == total_size) {
+            pb.finish_with_message(format!("✅ {} downloaded successfully", label));
+            return Ok(());
+        } else {
+            pb.finish_with_message(format!("❌ {} download failed", label));
+            println!("❌ Download failed. Expected: {} bytes, Downloaded: {} bytes", total_size, downloaded);
+            
+            // Clean up partial file
+            if let Err(e) = std::fs::remove_file(out_path) {
+                println!("Warning: Failed to remove partial file: {}", e);
+            }
+            
+            if attempt == max_retries {
+                return Err(format!("Download incomplete after {} attempts. Last attempt downloaded {} of {} bytes", 
+                    max_retries, downloaded, total_size).into());
+            }
+            
+            println!("Retrying in 5 seconds...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    Err("Download failed after all retries".into())
+}
+pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     let tools_dir = Path::new("tools");
 
     // Create tools directory if it doesn't exist
     fs::create_dir_all(&tools_dir)?;
 
-    // Helper closure for download with progress and size check
-    let download_with_progress = |url: &str, out_path: &str, label: &str, max_retries: usize| -> Result<(), Box<dyn std::error::Error>> {
-        let mut attempt = 0;
-        while attempt < max_retries {
-            attempt += 1;
-            println!("{}", format!("Downloading {} (Attempt {}/{})", label, attempt, max_retries).yellow());
-            let mut response = client.get(url)
-                .header("User-Agent", "laracli/1.0")
-                .send()?;
-
-            let total_size = response
-                .content_length()
-                .ok_or(format!("Failed to get content length for {} download", label))?;
-
-            let pb = ProgressBar::new(total_size);
-            pb.set_style(ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                .unwrap()
-                .progress_chars("#>-"));
-
-            let mut temp_out_path = format!("{}.tmp", out_path);
-            let mut out = fs::File::create(&temp_out_path)?;
-            let mut downloaded: u64 = 0;
-            let mut buffer = [0; 8192];
-            loop {
-                let n = response.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buffer[..n])?;
-                downloaded += n as u64;
-                pb.set_position(downloaded);
-            }
-            pb.finish_with_message(format!("✅ {} downloaded successfully", label));
-
-            if downloaded != total_size {
-                fs::remove_file(&temp_out_path)?;
-                if attempt == max_retries {
-                    return Err(format!("{} download incomplete after {} attempts: expected {} bytes, got {}", label, max_retries, total_size, downloaded).into());
-                }
-                std::thread::sleep(Duration::from_secs(2)); // Wait before retry
-                continue;
-            }
-
-            // Validate ZIP before renaming
-            let file = fs::File::open(&temp_out_path)?;
-            let mut archive = ZipArchive::new(file);
-            if archive.is_err() {
-                fs::remove_file(&temp_out_path)?;
-                if attempt == max_retries {
-                    return Err(format!("Invalid ZIP archive for {} after {} attempts: {}", label, max_retries, archive.unwrap_err()).into());
-                }
-                std::thread::sleep(Duration::from_secs(2)); // Wait before retry
-                continue;
-            }
-            fs::rename(&temp_out_path, out_path)?;
-            break;
-        }
-        Ok(())
-    };
-
     // --- Download and extract Nginx ---
     let nginx_url = "http://nginx.org/download/nginx-1.23.3.zip";
     let nginx_zip = "nginx-1.23.3.zip";
-    download_with_progress(nginx_url, nginx_zip, "Nginx", 3)?;
+    download_with_progress_async(nginx_url, nginx_zip, "Nginx", 3).await?;
 
     println!("{}", "Extracting Nginx".yellow());
     let nginx_file = fs::File::open(nginx_zip)?;
@@ -224,50 +261,54 @@ pub fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "✅ Nginx extracted successfully".green());
 
     // --- Download and extract MySQL ---
-    let mysql_url = "https://cdn.mysql.com//Downloads/MySQL-8.4/mysql-8.4.5-winx64.zip"; // Verified 247 MB
+    let mysql_url = "https://cdn.mysql.com//Downloads/MySQL-8.4/mysql-8.4.5-winx64.zip";
     let mysql_zip = "mysql-8.4.5-winx64_2.zip";
     println!("{}", "Downloading MySQL (approx. 247 MB, may take a few minutes)...".yellow());
-    download_with_progress(mysql_url, mysql_zip, "MySQL", 3)?;
+    download_with_progress_async(mysql_url, mysql_zip, "MySQL", 3).await?;
 
     println!("{}", "Extracting MySQL".yellow());
     let mysql_file = fs::File::open(mysql_zip)?;
     let mut mysql_archive = ZipArchive::new(mysql_file)?;
-    mysql_archive.extract(&tools_dir.join("mysql-8.4.5-winx64"))?;
+    mysql_archive.extract(&tools_dir)?;
     fs::remove_file(mysql_zip)?;
     println!("{}", "✅ MySQL extracted successfully".green());
 
-    // Create global Nginx config and config file
+    // --- Create Global Nginx Config ---
     println!("{}", "Creating config files".yellow());
     match nginx::create_global_nginx_config() {
         Ok(_) => println!("{}", "✅ Global Nginx config created".green()),
         Err(e) => println!("{}", format!("❌ Error creating global Nginx config: {}", e).red()),
     }
+
+    // --- Create Default Config File ---
     config::create_config_file();
     println!("{}", "✅ Config file created".green());
 
-    println!("{}", "creating my.ini".yellow());
+    // --- Create my.ini for MySQL ---
+    println!("{}", "Creating my.ini".yellow());
     helpers::mysql::create_my_ini_file();
     println!("{}", "✅ my.ini created".green());
 
+    // --- Initialize MySQL Data Directory ---
     println!("{}", "Creating MySQL data directory".yellow());
+    let mysql_path = helpers::path::get_mysql_path().unwrap();
+    let mysqld_path = Path::new(&mysql_path).join("bin").join("mysqld.exe");
 
-    let let_mysql_path = helpers::path::get_mysql_path().unwrap();
-    let mysqld_path = std::path::Path::new(&let_mysql_path).join("bin").join("mysqld.exe");
+    let output = Command::new(&mysqld_path)
+        .arg("--initialize-insecure")
+        .arg("--basedir")
+        .arg(&mysql_path)
+        .arg("--datadir")
+        .arg(Path::new(&mysql_path).join("data"))
+        .output();
 
-    let mysqld_command = Command::new(&mysqld_path)
-    .arg("--initialize-insecure")
-    .arg("/data")
-    .output();
-
-    let mysql_data_dir = std::path::Path::new(&let_mysql_path).join("data");
+    let mysql_data_dir = Path::new(&mysql_path).join("data");
 
     if mysql_data_dir.exists() {
         println!("{}", "✅ MySQL data directory created".green());
-    }else {
+    } else {
         println!("{}", "❌ Error creating MySQL data directory".red());
     }
-
-
 
     Ok(())
 }
@@ -279,13 +320,18 @@ pub fn add_exe_to_path() -> Result<(), Box<dyn std::error::Error>> {
 
     // Open the user environment variables
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let env = hkcu.open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE).expect("Failed to open Environment key");
+    let env = hkcu
+        .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
+        .expect("Failed to open Environment key");
 
     // Read the existing PATH value
     let current_path: String = env.get_value("Path").unwrap_or_default();
 
     // Only append if it's not already there
-    if !current_path.to_lowercase().contains(&new_path.to_lowercase()) {
+    if !current_path
+        .to_lowercase()
+        .contains(&new_path.to_lowercase())
+    {
         let updated_path = format!("{};{}", current_path, new_path);
         env.set_value("Path", &updated_path)?;
         println!("{}", "✅ Current executable added to PATH".green());
@@ -295,11 +341,12 @@ pub fn add_exe_to_path() -> Result<(), Box<dyn std::error::Error>> {
 
     notify_environment_change();
 
-    println!("{}", r#"✅ You are ready to star type "laracli run"  "#.green());
+    println!(
+        "{}",
+        r#"✅ You are ready to star type "laracli run"  "#.green()
+    );
 
     Ok(())
-
-
 }
 
 fn is_elevated() -> bool {
