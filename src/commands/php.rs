@@ -3,9 +3,10 @@ use std::{
     fs::File,
     io::{Read, Write},
     net::TcpStream,
-    path::Path,
     process::Command,
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 pub fn start_php_cgi() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "Starting PHP service...".yellow());
@@ -17,21 +18,24 @@ pub fn start_php_cgi() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let php_path = crate::helpers::path::get_php_path()?;
+    let exe_dir = php_path.parent().ok_or("Failed to get executable directory")?;
+    let pid_file = exe_dir.join("php.pid");
 
-    let output = Command::new(&php_path.join("php-cgi.exe"))
-        .arg("-b")
-        .arg("127.0.0.1:9000")
-        .spawn();
+    let mut command = Command::new(&php_path.join("php-cgi.exe"));
+    command.arg("-b").arg("127.0.0.1:9000");
 
-    match output {
-        Ok(output) => {
-            println!("{}", "✔ PHP service started successfully.".green());
-        }
-        Err(e) => {
-            println!("{}", "❌ Failed to start PHP service.".red());
-            println!("{}", e.to_string());
-        }
-    }
+    // Detach the process on Windows
+    #[cfg(windows)]
+    command.creation_flags(0x00000008); // DETACHED_PROCESS flag
+
+    let child = command.spawn()?;
+
+    // Store the PID in php.pid
+    let pid = child.id();
+    File::create(&pid_file)?.write_all(pid.to_string().as_bytes())?;
+    println!("ℹ PHP-CGI PID {} saved to {}.", pid, pid_file.display().to_string().blue());
+
+    println!("{}", "✔ PHP service started successfully.".green());
 
     Ok(())
 }
@@ -179,16 +183,7 @@ pub fn disable_php_extension(extension: &str) -> Result<(), Box<dyn std::error::
 
 pub fn restart_php_service() -> Result<(), Box<dyn std::error::Error>> {
     // Stop PHP service
-    let output = Command::new("taskkill")
-        .args(&["/F", "/IM", "php-cgi.exe"])
-        .output();
-
-    // Wait for PHP service to stop
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    match output {
-        Ok(_) => println!("✔ PHP service stopped successfully."),
-        Err(e) => println!("Error stopping PHP service: {}", e),
-    }
+    stop_php_cgi()?;
 
     // Start PHP service
     start_php_cgi()?;
@@ -196,12 +191,46 @@ pub fn restart_php_service() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 pub fn stop_php_cgi() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "Stopping PHP service...".yellow());
-    Command::new("taskkill")
-        .args(&["/F", "/IM", "php-cgi.exe"])
-        .output()?;
-    println!("{}", "✔ PHP service stopped successfully.".green());
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
+    let pid_file = exe_dir.join("php.pid");
+
+    if !pid_file.exists() {
+        println!("{}", "ℹ No php.pid file found. Attempting to stop php-cgi.exe processes.".blue());
+        let output = Command::new("taskkill")
+            .args(&["/F", "/IM", "php-cgi.exe"])
+            .output();
+        match output {
+            Ok(_) => println!("{}", "✔ PHP service stopped successfully.".green()),
+            Err(e) => println!("Error stopping PHP service: {}", e),
+        }
+        return Ok(());
+    }
+
+    // Read PID from php.pid
+    let mut pid_content = String::new();
+    File::open(&pid_file)?.read_to_string(&mut pid_content)?;
+    let pid: u32 = pid_content.trim().parse().map_err(|_| "Invalid PID in php.pid")?;
+
+    // Attempt to terminate the specific PID
+    let output = Command::new("taskkill")
+        .args(&["/F", "/PID", &pid.to_string()])
+        .output();
+
+    match output {
+        Ok(_) => {
+            println!("{}", "✔ PHP service stopped successfully.".green());
+            // Remove the pid file
+            std::fs::remove_file(&pid_file)?;
+            println!("ℹ Removed {}.", pid_file.display().to_string().blue());
+        }
+        Err(e) => {
+            println!("{}", "❌ Failed to stop PHP service.".red());
+            println!("Error: {}", e);
+        }
+    }
+
     Ok(())
 }
