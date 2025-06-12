@@ -11,10 +11,13 @@ pub fn start() -> Result<(), Box<dyn std::error::Error>> {
     //check if nginx is already running by checking pid file at logs/
 
     let pid_file_path = format!("{}/logs/nginx.pid", path::get_nginx_path()?);
-    let pid_file = Path::new(&pid_file_path);
-    if pid_file.exists() {
+    let output = Command::new("sc")
+        .args(&["query", "nginx"])
+        .output()?;
+    
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).contains("RUNNING") {
         println!("{}", "✔ Nginx service is already running.".green());
-        return Ok(()); // Nginx is already running
+        return Ok(());
     }
 
 
@@ -76,11 +79,6 @@ pub fn reload() -> Result<(), Box<dyn std::error::Error>> {
     let nginx_path = path::get_nginx_path()?;
     let nginx_exe = format!("{}/nginx.exe", &nginx_path);
     let output = Command::new(&nginx_exe)
-        .current_dir(&nginx_path)   
-        .arg("-p")
-        .arg(".")
-        .arg("-c")
-        .arg("conf/nginx.conf")
         .arg("-s")
         .arg("reload")
         .spawn()?

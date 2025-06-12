@@ -1,17 +1,18 @@
 use colored::Colorize;
 mod cli;
 mod commands {
-    pub mod nginx;
-    pub mod mysql;
-    pub mod watch;
     pub mod link;
-    pub mod setup;
+    pub mod mysql;
+    pub mod nginx;
     pub mod php;
+    pub mod phpmyadmin;
+    pub mod setup;
+    pub mod watch;
 }
 mod helpers;
 mod utils;
 
-const VERSION: &str = "0.3.0-beta";
+const VERSION: &str = "0.4.0-beta";
 const NAME: &str = "laracli";
 const BUILD_DATE: &str = env!("BUILD_DATE");
 const GIT_HASH: &str = env!("GIT_HASH");
@@ -21,8 +22,6 @@ fn print_version() {
     println!("Build: {} ({})", BUILD_DATE.dimmed(), GIT_HASH.dimmed());
     println!("Platform: {}", std::env::consts::OS);
 }
-
-
 
 #[tokio::main]
 async fn main() {
@@ -71,8 +70,11 @@ async fn main() {
         }
         cli::Commands::Setup(_) => {
             println!("{}", "Setting up services...".yellow());
-            commands::setup::setup_tools().await.expect("Failed to setup tools");
+            commands::setup::setup_tools()
+                .await
+                .expect("Failed to setup tools");
             commands::setup::setup_services().expect("Failed to setup services");
+            commands::setup::setup_permissions().expect("Failed to setup permissions");
             helpers::config::create_config_file();
             commands::setup::add_exe_to_path().expect("Failed to add exe to path");
         }
@@ -80,11 +82,29 @@ async fn main() {
             commands::php::start_php_cgi().expect("Failed to start PHP CGI");
             commands::nginx::start().expect("Failed to start Nginx");
             commands::mysql::start().expect("Failed to start MySQL");
-
         }
         cli::Commands::Version(_) => {
-           print_version();
+            print_version();
         }
-
+        cli::Commands::Enable(enable) => match enable.feature {
+            cli::Feature::PhpMyAdmin(_) => {
+                commands::phpmyadmin::enable_phpmyadmin().await.expect("Failed to enable phpMyAdmin");
+            }
+        },
+        cli::Commands::PhpExtension(ext) => match ext.action {
+            cli::PhpExtensionAction::Enable(ext_cmd) => {
+                commands::php::enable_php_extension(&ext_cmd.extension)
+                    .expect("Failed to enable PHP extension");
+            }
+            cli::PhpExtensionAction::Disable(ext_cmd) => {
+                commands::php::disable_php_extension(&ext_cmd.extension)
+                    .expect("Failed to disable PHP extension");
+            }
+        },
+        cli::Commands::StopDev(_) => {
+            commands::php::stop_php_cgi().expect("Failed to start PHP CGI");
+            commands::nginx::stop().expect("Failed to start Nginx");
+            commands::mysql::stop().expect("Failed to start MySQL");
+        }
     }
 }

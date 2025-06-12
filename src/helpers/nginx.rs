@@ -4,23 +4,27 @@ use crate::helpers::{path};
 
 
 pub fn create_global_nginx_config() -> Result<(), Box<dyn std::error::Error>> {
-    let nginx_path = path::get_nginx_path().unwrap();
-    let global_config_path = std::path::Path::new(&nginx_path).join("conf/nginx.conf");
-    let config_content = generate_nginx_global_config(std::path::Path::new(&nginx_path).join("sites-enabled").to_str().unwrap());
-    let mut file = OpenOptions::new()
-    .create(true)
-    .write(true)
-    .open(&global_config_path)?;
-    file.write_all(config_content.as_bytes())?;
-    Ok(())
-}
-
-
-
-pub fn create_nginx_config(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let  nginx_path = path::get_nginx_path().unwrap();
     let global_config_path = std::path::Path::new(&nginx_path).join("conf/nginx.conf");
 
+    //check global nginx.conf exists
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&global_config_path)?;
+
+    let config_content = generate_nginx_global_config(std::path::Path::new(&nginx_path).join("sites-enabled").to_str().unwrap());
+
+    file.write_all(config_content.as_bytes())?;
+    return Ok(());
+}
+
+
+pub fn create_nginx_config(path: &str, host_name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let nginx_path = path::get_nginx_path().unwrap();
+    let global_config_path = std::path::Path::new(&nginx_path).join("conf/nginx.conf");
+    
     //check global nginx.conf exists
     if !global_config_path.exists() {
         let mut file = OpenOptions::new()
@@ -28,12 +32,10 @@ pub fn create_nginx_config(path: &str) -> Result<(), Box<dyn std::error::Error>>
             .write(true)
             .open(&global_config_path)?;
 
-    let config_content = generate_nginx_global_config(std::path::Path::new(&nginx_path).join("sites-enabled").to_str().unwrap());
-
-
+        let config_content = generate_nginx_global_config(
+            std::path::Path::new(&nginx_path).join("sites-enabled").to_str().unwrap()
+        );
         file.write_all(config_content.as_bytes())?;
-
-        return Ok(());
     }
 
     //check if sites-enabled exists
@@ -41,15 +43,16 @@ pub fn create_nginx_config(path: &str) -> Result<(), Box<dyn std::error::Error>>
         std::fs::create_dir(std::path::Path::new(&nginx_path).join("sites-enabled"))?;
     }
 
-
-    let config_name = std::path::Path::new(&path).file_name().unwrap().to_str().unwrap();
+    let config_name = std::path::Path::new(path).file_name().unwrap().to_str().unwrap();
 
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
-        .open(std::path::Path::new(&path::get_nginx_path().unwrap()).join("sites-enabled").join(format!("{}.conf", config_name)))?;
+        .open(std::path::Path::new(&nginx_path).join("sites-enabled").join(format!("{}.conf", config_name)))?;
 
-    let config_content = generate_nginx_site_config(path, config_name);
+    // Use host_name if provided, otherwise use config_name
+    let server_name = host_name.unwrap_or(config_name);
+    let config_content = generate_nginx_site_config(path, server_name);
 
     file.write_all(config_content.as_bytes())?;
     Ok(())
@@ -104,7 +107,7 @@ pid        logs/nginx.pid;
     )
 }
 
-fn generate_nginx_site_config(path: &str, server_name: &str) -> String {
+pub fn generate_nginx_site_config(path: &str, server_name: &str) -> String {
     let root_path = {
         let path = std::path::Path::new(path);
         if path.join("index.php").exists() || path.join("index.html").exists() || path.join("index.htm").exists() {

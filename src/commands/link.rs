@@ -17,7 +17,7 @@ pub fn link(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Updated config with linked path: {}", path.display());
 
     // Create nginx config immediately
-    match helpers::nginx::create_nginx_config(path.to_str().unwrap()) {
+    match helpers::nginx::create_nginx_config(path.to_str().unwrap(), None) {
         Ok(()) => println!("✅ Nginx config created"),
         Err(e) => println!("❌ Error creating Nginx config: {}", e),
     }
@@ -52,7 +52,7 @@ pub fn unlink(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Restart laracli_config service to process config changes
-    restart_config_service()?;
+    crate::commands::nginx::reload()?;
 
     println!("✅ Project unlinked! Service will no longer monitor this directory.");
 

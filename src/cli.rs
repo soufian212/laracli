@@ -14,7 +14,11 @@ pub enum Commands {
     Unlink(Unlink),
     Setup(Setup),
     StartDev(Run),
-    Version(Version)
+    StopDev(StopDev),
+    Version(Version),
+    Enable(Enable),
+    // Disable(Disable),
+    PhpExtension(PhpExtension),
 }
 
 #[derive(FromArgs, Debug)]
@@ -121,6 +125,86 @@ pub struct Run {}
 #[derive(FromArgs, Debug)]
 #[argh(subcommand, name = "version")]
 pub struct Version {}
+
+/// Enable a feature (e.g., phpmyadmin)
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "enable")]
+pub struct Enable {
+    /// feature to enable (e.g., phpmyadmin)
+    #[argh(subcommand)]
+    pub feature: Feature,
+}
+
+/// Disable a feature (e.g., phpmyadmin)
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "disable")]
+pub struct Disable {
+    /// feature to disable (e.g., phpmyadmin)
+    #[argh(subcommand)]
+    pub feature: Feature,
+}
+
+#[derive(FromArgs, Debug)]
+#[argh(subcommand)]
+pub enum Feature {
+    PhpMyAdmin(PhpMyAdmin),
+}
+
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "phpmyadmin")]
+/// phpMyAdmin feature
+pub struct PhpMyAdmin {}
+
+/// Manage PHP extensions
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "php-ext")]
+pub struct PhpExtension {
+    /// PHP extension subcommand: enable or disable
+    #[argh(subcommand)]
+    pub action: PhpExtensionAction,
+}
+
+#[derive(FromArgs, Debug)]
+#[argh(subcommand)]
+pub enum PhpExtensionAction {
+    Enable(EnablePhpExtension),
+    Disable(DisablePhpExtension),
+}
+
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "enable")]
+/// Enable a PHP extension
+pub struct EnablePhpExtension {
+    /// name of the PHP extension to enable (e.g., mbstring)
+    #[argh(positional)]
+    pub extension: String,
+}
+
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "disable")]
+/// Disable a PHP extension
+pub struct DisablePhpExtension {
+    /// name of the PHP extension to disable (e.g., mbstring)
+    #[argh(positional)]
+    pub extension: String,
+}
+
+/// Stop php nginx and mysql services
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "stop-dev")]
+pub struct StopDev {}
+
+
+
+
+
+
+
+
+
+
+
+
 
 #[derive(FromArgs, Debug)]
 /// laracli

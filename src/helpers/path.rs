@@ -23,6 +23,13 @@ pub fn get_mysql_path() -> Result<String, Box<dyn std::error::Error>> {
 
 pub fn get_php_path() -> Result< PathBuf, Box<dyn std::error::Error>> {
     let current_exe_dir = get_current_exe_dir()?;
-    let php_path = std::path::Path::new(&current_exe_dir).join("tools/php-8.4.8-nts-Win32-vs17-x64");
+    let php_path = std::path::Path::new(&current_exe_dir).join("tools/php-8.3.22-nts-Win32-vs16-x64");
     Ok(php_path)
 }
+
+pub fn get_tools_path() -> Result< PathBuf, Box<dyn std::error::Error>> {
+    let current_exe_dir = get_current_exe_dir()?;
+    let tools_dir = std::path::Path::new(&current_exe_dir).join("tools");
+    Ok(tools_dir)
+}
+

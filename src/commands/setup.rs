@@ -2,6 +2,8 @@ use colored::Colorize;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use laracli::helpers::{self, config, nginx};
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -10,12 +12,154 @@ use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
-use std::fs::File;
 use winreg::RegKey;
 use winreg::enums::*;
 use zip::ZipArchive;
-use std::fs::OpenOptions;
 
+pub fn setup_permissions() -> Result<(), Box<dyn std::error::Error>> {
+    // Define resources: (resource_name, binary_path, base_path_function, directories_to_grant)
+    let resources = vec![
+        (
+            "laracli",
+            "laracli.exe",
+            None::<Box<dyn Fn() -> Result<String, Box<dyn std::error::Error>>>>,
+            vec![] as Vec<(&str, &str)>,
+        ),
+        (
+            "nginx",
+            "nginx.exe",
+            Some(Box::new(|| helpers::path::get_nginx_path())),
+            vec![("logs", "(M)"), ("conf", "(M)")],
+        ),
+        (
+            "mysql",
+            "bin/mysqld.exe",
+            Some(Box::new(|| helpers::path::get_mysql_path())),
+            vec![("data", "(M)"), ("my.ini", "(M)")],
+        ),
+        (
+            "php",
+            "php-cgi.exe",
+            Some(Box::new(|| {
+                helpers::path::get_php_path().map(|path| path.to_string_lossy().into_owned())
+            })),
+            vec![("php.ini", "(M)")],
+        ),
+    ];
+
+    // Ensure we're running with admin privileges
+    if !is_elevated() {
+        println!(
+            "{}",
+            "This command requires administrative privileges. Please run as administrator.".green()
+        );
+        return Err("Administrative privileges required".into());
+    }
+
+    // Get the directory of the current executable
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path
+        .parent()
+        .ok_or("Could not determine executable directory")?;
+    println!("Using executable directory: {:?}", exe_dir);
+
+    // Configure permissions for each resource
+    for (resource_name, binary_path, base_path_fn, directories) in resources.iter() {
+        // Determine binary path
+        let binary_full_path = if let Some(get_path) = base_path_fn {
+            Path::new(&get_path()?).join(binary_path)
+        } else {
+            exe_dir.join(binary_path)
+        };
+
+        if !binary_full_path.exists() {
+            println!("Binary not found: {:?}", binary_full_path);
+            return Err(format!("Binary {} not found", binary_path).into());
+        }
+
+        // Grant Users group read/execute permissions on the binary
+        println!("Setting permissions for {}", binary_full_path.display());
+        let icacls_output = Command::new("icacls")
+            .args(&[
+                binary_full_path.to_str().ok_or("Invalid path")?,
+                "/grant",
+                "*S-1-5-32-545:(RX)",
+                "/T",
+            ])
+            .output()?;
+        if !icacls_output.status.success() {
+            let stderr = String::from_utf8_lossy(&icacls_output.stderr);
+            println!(
+                "Failed to set permissions for {}: {}",
+                binary_full_path.display(),
+                stderr
+            );
+            return Err(format!(
+                "Failed to set permissions for {}: {}",
+                binary_full_path.display(),
+                stderr
+            )
+            .into());
+        }
+
+        // Grant permissions on directories if base_path_fn exists
+        if let Some(get_path) = base_path_fn {
+            let base_path = get_path()?;
+            for (dir, perm) in directories {
+                let dir_path = Path::new(&base_path).join(dir);
+                if dir_path.exists() {
+                    let icacls_dir_output = Command::new("icacls")
+                        .args(&[
+                            dir_path.to_str().ok_or("Invalid directory path")?,
+                            "/grant",
+                            &format!("*S-1-5-32-545:{}", perm),
+                            "/T",
+                        ])
+                        .output()?;
+                    if !icacls_dir_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&icacls_dir_output.stderr);
+                        println!(
+                            "Failed to set permissions for {}: {}",
+                            dir_path.display(),
+                            stderr
+                        );
+                        return Err(format!(
+                            "Failed to set permissions for {}: {}",
+                            dir_path.display(),
+                            stderr
+                        )
+                        .into());
+                    }
+                } else {
+                    println!(
+                        "{}",
+                        format!(
+                            "⚠️ Directory {} does not exist, skipping permission configuration",
+                            dir_path.display()
+                        )
+                        .yellow()
+                    );
+                }
+            }
+        }
+
+        println!("Successfully configured permissions for {}", resource_name);
+    }
+
+    // Create default config if it doesn't exist
+    let config_path = Path::new(r"C:\laracli\config.json");
+    if !config_path.exists() {
+        fs::create_dir_all(config_path.parent().unwrap())?;
+        let default_config = r#"{
+            "watched_paths": [],
+            "linked_paths": []
+        }"#;
+        fs::write(config_path, default_config)?;
+        println!("Created default config at {:?}", config_path);
+    }
+
+    Ok(())
+}
 
 pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
     let services = vec![
@@ -25,7 +169,10 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
 
     // Ensure we're running with admin privileges
     if !is_elevated() {
-        println!("This command requires administrative privileges. Please run as administrator.");
+        println!(
+            "{}",
+            "This command requires administrative privileges. Please run as administrator.".green()
+        );
         return Err("Administrative privileges required".into());
     }
 
@@ -45,35 +192,43 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Install and configure services
+    //check if the services are already installed
     for (service_name, binary_name) in services.iter() {
-        // Construct the full path for the service binary
-        let binary_path = exe_dir.join(binary_name).canonicalize()?;
-        let binary_path_str = binary_path.to_string_lossy();
-        let formatted_path = format!(r#""{}""#, binary_path_str);
+        let output = Command::new("sc").args(&["query", service_name]).output()?;
+        if output.status.success() {
+            println!("Service {} is already installed", service_name);
+            continue;
+        } else {
+            // install the service
+            // Construct the full path for the service binary
+            let binary_path = exe_dir.join(binary_name).canonicalize()?;
+            let binary_path_str = binary_path.to_string_lossy();
+            let formatted_path = format!(r#""{}""#, binary_path_str);
 
-        // Build and log the sc create command
-        let sc_args = vec![
-            "create",
-            service_name,
-            "binPath=",
-            &formatted_path,
-            "start=",
-            "auto",
-        ];
-        println!("Executing sc command: sc {}", sc_args.join(" "));
+            // Build and log the sc create command
+            let sc_args = vec![
+                "create",
+                service_name,
+                "binPath=",
+                &formatted_path,
+                "start=",
+                "auto",
+            ];
+            println!("Executing sc command: sc {}", sc_args.join(" "));
 
-        // Install service
-        let install_output = Command::new("sc").args(&sc_args).output()?;
+            // Install service
+            let install_output = Command::new("sc").args(&sc_args).output()?;
 
-        if !install_output.status.success() {
-            let stderr = String::from_utf8_lossy(&install_output.stderr);
-            println!("Failed to install {} service: {}", service_name, stderr);
-            return Err(format!("Failed to install {} service: {}", service_name, stderr).into());
-        }
+            if !install_output.status.success() {
+                let stderr = String::from_utf8_lossy(&install_output.stderr);
+                println!("Failed to install {} service: {}", service_name, stderr);
+                return Err(
+                    format!("Failed to install {} service: {}", service_name, stderr).into(),
+                );
+            }
 
-        // Set service permissions
-        let perm_output = Command::new("sc")
+            // Set service permissions
+            let perm_output = Command::new("sc")
             .args(&[
                 "sdset",
                 service_name,
@@ -81,45 +236,48 @@ pub fn setup_services() -> Result<(), Box<dyn std::error::Error>> {
             ])
             .output()?;
 
-        if !perm_output.status.success() {
+            if !perm_output.status.success() {
+                println!(
+                    "Failed to set permissions for {} service: {}",
+                    service_name,
+                    String::from_utf8_lossy(&perm_output.stderr)
+                );
+                return Err(
+                    format!("Failed to set permissions for {} service", service_name).into(),
+                );
+            }
+
+            // Grant permissions to hosts file
+            let hosts_path = r"C:\Windows\System32\drivers\etc\hosts";
+            let icacls_output = Command::new("icacls")
+                .args(&[hosts_path, "/grant", "*S-1-5-19:F", "/T"])
+                .output()?;
+
+            if !icacls_output.status.success() {
+                println!(
+                    "Failed to set hosts file permissions: {}",
+                    String::from_utf8_lossy(&icacls_output.stderr)
+                );
+                return Err("Failed to set hosts file permissions".into());
+            }
+
+            // Start the service
+            let start_output = Command::new("sc").args(&["start", service_name]).output()?;
+
+            if !start_output.status.success() {
+                println!(
+                    "Failed to start {} service: {}",
+                    service_name,
+                    String::from_utf8_lossy(&start_output.stderr)
+                );
+                return Err(format!("Failed to start {} service", service_name).into());
+            }
+
             println!(
-                "Failed to set permissions for {} service: {}",
-                service_name,
-                String::from_utf8_lossy(&perm_output.stderr)
+                "Successfully installed and started {} service",
+                service_name
             );
-            return Err(format!("Failed to set permissions for {} service", service_name).into());
         }
-
-        // Grant permissions to hosts file
-        let hosts_path = r"C:\Windows\System32\drivers\etc\hosts";
-        let icacls_output = Command::new("icacls")
-            .args(&[hosts_path, "/grant", "*S-1-5-19:F", "/T"])
-            .output()?;
-
-        if !icacls_output.status.success() {
-            println!(
-                "Failed to set hosts file permissions: {}",
-                String::from_utf8_lossy(&icacls_output.stderr)
-            );
-            return Err("Failed to set hosts file permissions".into());
-        }
-
-        // Start the service
-        let start_output = Command::new("sc").args(&["start", service_name]).output()?;
-
-        if !start_output.status.success() {
-            println!(
-                "Failed to start {} service: {}",
-                service_name,
-                String::from_utf8_lossy(&start_output.stderr)
-            );
-            return Err(format!("Failed to start {} service", service_name).into());
-        }
-
-        println!(
-            "Successfully installed and started {} service",
-            service_name
-        );
     }
 
     // Create default config if it doesn't exist
@@ -155,7 +313,11 @@ pub async fn download_with_progress_async(
     for attempt in 1..=max_retries {
         println!(
             "{}",
-            format!("Downloading {} (Attempt {}/{})", label, attempt, max_retries).yellow()
+            format!(
+                "Downloading {} (Attempt {}/{})",
+                label, attempt, max_retries
+            )
+            .yellow()
         );
 
         // Check if partial file exists for resume
@@ -178,7 +340,11 @@ pub async fn download_with_progress_async(
             Err(e) => {
                 println!("❌ Request failed: {}", e);
                 if attempt == max_retries {
-                    return Err(format!("Failed to GET from '{}' after {} attempts: {}", url, max_retries, e).into());
+                    return Err(format!(
+                        "Failed to GET from '{}' after {} attempts: {}",
+                        url, max_retries, e
+                    )
+                    .into());
                 }
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;
@@ -188,7 +354,12 @@ pub async fn download_with_progress_async(
         if !res.status().is_success() && res.status().as_u16() != 206 {
             println!("❌ HTTP error: {}", res.status());
             if attempt == max_retries {
-                return Err(format!("HTTP error {}: {}", res.status(), res.status().canonical_reason().unwrap_or("Unknown")).into());
+                return Err(format!(
+                    "HTTP error {}: {}",
+                    res.status(),
+                    res.status().canonical_reason().unwrap_or("Unknown")
+                )
+                .into());
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
             continue;
@@ -265,7 +436,9 @@ pub async fn download_with_progress_async(
                     pb.set_position(downloaded);
 
                     // Flush every 10MB or every 5 seconds
-                    if downloaded % (10 * 1024 * 1024) == 0 || last_progress.elapsed() > Duration::from_secs(5) {
+                    if downloaded % (10 * 1024 * 1024) == 0
+                        || last_progress.elapsed() > Duration::from_secs(5)
+                    {
                         if let Err(e) = file.flush() {
                             println!("❌ Error flushing file: {}", e);
                             download_success = false;
@@ -294,17 +467,23 @@ pub async fn download_with_progress_async(
             return Ok(());
         } else {
             pb.finish_with_message(format!("❌ {} download failed", label));
-            println!("❌ Download failed. Expected: {} bytes, Downloaded: {} bytes", total_size, downloaded);
-            
+            println!(
+                "❌ Download failed. Expected: {} bytes, Downloaded: {} bytes",
+                total_size, downloaded
+            );
+
             if attempt == max_retries {
                 // Clean up partial file only on final failure
                 if let Err(e) = std::fs::remove_file(out_path) {
                     println!("Warning: Failed to remove partial file: {}", e);
                 }
-                return Err(format!("Download incomplete after {} attempts. Last attempt downloaded {} of {} bytes", 
-                    max_retries, downloaded, total_size).into());
+                return Err(format!(
+                    "Download incomplete after {} attempts. Last attempt downloaded {} of {} bytes",
+                    max_retries, downloaded, total_size
+                )
+                .into());
             }
-            
+
             println!("Retrying in 10 seconds...");
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -313,9 +492,8 @@ pub async fn download_with_progress_async(
     Err("Download failed after all retries".into())
 }
 
-
 pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
-    let tools_dir = Path::new("tools");
+    let tools_dir = helpers::path::get_tools_path()?;
 
     // Create tools directory if it doesn't exist
     fs::create_dir_all(&tools_dir)?;
@@ -331,25 +509,37 @@ pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     nginx_archive.extract(&tools_dir)?;
     fs::remove_file(nginx_zip)?;
     println!("{}", "✅ Nginx extracted successfully".green());
+    println!("");
 
-    
     // --- Download and extract Php ---
-    let php_url = "https://files04.tchspt.com/down/php-8.4.8-Win32-vs17-x64.zip";
-    let php_zip = "php-8.4.8-nts-Win32-vs17-x64.zip";
-    println!("{}", "Downloading PHP (approx. 32 MB, may take a few minutes)...".yellow());
+    let php_url = "https://repos.zend.com/zendphp/windows/zendphp-8.3.22-nts-Win32-vs16-x64.zip";
+    let php_zip = "php-8.3.22-nts-Win32-vs16-x64.zip";
+    println!("{}", "Downloading PHP ...".yellow());
     download_with_progress_async(php_url, php_zip, "PHP", 3).await?;
     println!("{}", "Extracting PHP".yellow());
     let php_file = fs::File::open(php_zip)?;
     let mut php_archive = ZipArchive::new(php_file)?;
     php_archive.extract(&tools_dir.join(&php_zip.replace(".zip", "")))?;
     fs::remove_file(php_zip)?;
+    // Rename php.ini-development to php.ini
+    let php_ini_development = tools_dir
+        .join("php-8.3.22-nts-Win32-vs16-x64")
+        .join("php.ini-development");
+    let php_ini = tools_dir
+        .join("php-8.3.22-nts-Win32-vs16-x64")
+        .join("php.ini");
+    fs::rename(php_ini_development, php_ini)?;
     println!("{}", "✅ PHP extracted successfully".green());
+    println!("");
 
     //--- Download and extract MySQL ---
     let mysql_url = "https://cdn.mysql.com//Downloads/MySQL-8.4/mysql-8.4.5-winx64.zip";
     let mysql_zip = "mysql-8.4.5-winx64_2.zip";
-    println!("{}", "Downloading MySQL (approx. 247 MB, may take a few minutes)...".yellow());
-    download_with_progress_async(mysql_url, mysql_zip, "MySQL", 3).await?;
+    println!(
+        "{}",
+        "Downloading MySQL (approx. 247 MB, may take a few minutes)...".yellow()
+    );
+    download_with_progress_async(mysql_url, mysql_zip, "MySQL", 7).await?;
 
     println!("{}", "Extracting MySQL".yellow());
     let mysql_file = fs::File::open(mysql_zip)?;
@@ -357,17 +547,17 @@ pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     mysql_archive.extract(&tools_dir)?;
     fs::remove_file(mysql_zip)?;
     println!("{}", "✅ MySQL extracted successfully".green());
+    println!("");
 
     // --- Create Global Nginx Config ---
     println!("{}", "Creating config files".yellow());
-    match nginx::create_global_nginx_config() {
+    match helpers::nginx::create_global_nginx_config() {
         Ok(_) => println!("{}", "✅ Global Nginx config created".green()),
-        Err(e) => println!("{}", format!("❌ Error creating global Nginx config: {}", e).red()),
+        Err(e) => println!(
+            "{}",
+            format!("❌ Error creating global Nginx config: {}", e).red()
+        ),
     }
-
-    // --- Create Default Config File ---
-    config::create_config_file();
-    println!("{}", "✅ Config file created".green());
 
     // --- Create my.ini for MySQL ---
     println!("{}", "Creating my.ini".yellow());
@@ -398,7 +588,6 @@ pub async fn setup_tools() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 pub fn add_exe_to_path() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "Adding current executable to PATH".yellow());
     let new_path = helpers::path::get_current_exe_dir().unwrap();
@@ -428,7 +617,9 @@ pub fn add_exe_to_path() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "{}",
-        r#"✅ You are ready to star type "laracli run-dev"  "#.green()
+        r#"🚀 You are ready to star type "laracli start-dev"  "#
+            .green()
+            .bold()
     );
 
     Ok(())

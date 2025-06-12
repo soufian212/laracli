@@ -1,5 +1,5 @@
 use std::env;
-use std::fs::{self, File};
+use std::fs::{File};
 use std::path::Path;
 use std::process::Command;
 use chrono::Local;
