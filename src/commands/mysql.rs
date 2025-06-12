@@ -7,21 +7,28 @@ use std::process::Child;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+use chrono::format;
 use colored::Colorize;
+use laracli::helpers;
 
 pub fn start() -> Result<Child, std::io::Error>  {
     println!("{}", "Starting MySQL service...".yellow());
 
     //check if mysql already running
 
+    let mysql_path = helpers::path::get_mysql_path().unwrap();
+    let mysql_bin = Path::new(&mysql_path).join("bin/mysqld.exe");
+    let ini_file = Path::new(&mysql_path).join("my.ini");
 
-    let mysql_bin = Path::new("tools/mysql-8.4.5-winx64/bin/mysqld.exe");
-    let ini_file = Path::new("tools/mysql-8.4.5-winx64/my.ini");
-
-    if !mysql_bin.exists() || !ini_file.exists() {
+    if !mysql_bin.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "MySQL binary or ini file not found",
+            format!("MySQL binary not found at {}", mysql_bin.to_str().unwrap()),
+        ));
+    } else if !ini_file.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("MySQL ini file not found at {}", ini_file.to_str().unwrap()),
         ));
     }
 
