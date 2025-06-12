@@ -965,7 +965,11 @@ dependencies = [
 
 [[package]]
 name = "laracli"
+<<<<<<< HEAD
 version = "0.4.3"
+=======
+version = "0.4.2"
+>>>>>>> 755c69e255350c0468339af5aa5f7f3d1fa1ba1f
 dependencies = [
  "argh",
  "chrono",
