@@ -26,7 +26,7 @@ log-error=./mysql-error.log
 pid-file=./mysql.pid
 lc-messages-dir=./share
         "#,
-        path.replace("\\", "/"),
+        my_ini_dir_path.replace("\\", "/"),
         my_ini_dir_path.replace("\\", "/"),
         my_ini_dir_path.replace("\\", "/")
     )
